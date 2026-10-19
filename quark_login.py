@@ -1,3 +1,5 @@
+import ast
+import json
 import os
 import time
 from typing import Dict, Union, List
@@ -19,7 +21,7 @@ class QuarkLogin:
         cookie = page.context.cookies()
 
         with open(f'{CONFIG_DIR}/cookies.txt', 'w', encoding='utf-8') as f:
-            f.write(str(cookie))
+            json.dump(cookie, f, ensure_ascii=False)
 
     @retry
     def login(self) -> None:
@@ -71,8 +73,13 @@ class QuarkLogin:
             with open(f'{CONFIG_DIR}/cookies.txt', 'r') as f:
                 content = f.read()
 
-            if content and '[' in content:
-                saved_cookies = eval(content)
+            if content.lstrip().startswith('['):
+                try:
+                    saved_cookies = json.loads(content)
+                except json.JSONDecodeError:
+                    saved_cookies = ast.literal_eval(content)
+                if not isinstance(saved_cookies, list):
+                    return None
                 cookies_dict = self.transfer_cookies(saved_cookies)
                 timestamp = int(time.time())
                 if 'expires' in cookies_dict and timestamp > int(cookies_dict['expires']):
@@ -88,17 +95,11 @@ class QuarkLogin:
         cookie = self.check_cookies()
         if not cookie:
             self.login()
-            with open(f'{CONFIG_DIR}/cookies.txt', 'r') as f:
-                content = f.read()
-                if not content:
-                    return
-                saved_cookies = eval(content)
-            cookies_dict = self.transfer_cookies(saved_cookies)
-            return self.dict_to_cookie_str(cookies_dict)
+            cookie = self.check_cookies()
 
-        elif isinstance(cookie, dict):
+        if isinstance(cookie, dict):
             return self.dict_to_cookie_str(cookie)
-        elif isinstance(cookie, str):
+        if isinstance(cookie, str):
             return cookie
 
 

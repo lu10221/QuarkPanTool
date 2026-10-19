@@ -41,6 +41,24 @@ python quark.py
 
 运行后会使用playwright进行登录操作，当然也可以自己手动获取cookie填写到config/cookies.txt文件中。更多说明请浏览 [wiki](https://github.com/ihmily/QuarkPanTool/wiki) 页面
 
+## 本地 Web 工作台
+
+项目现在也可以通过浏览器操作。需要 Python 3.11 和 Node.js；首次运行先安装依赖并构建页面：
+
+```powershell
+pip install -r requirements.txt
+playwright install firefox
+cd web
+npm install
+npm run build
+cd ..
+python web_app.py
+```
+
+打开 `http://127.0.0.1:8765`。服务仅监听本机。Web 工作台支持登录状态检查、浏览目录、新建文件夹、转存分享链接、下载自己的分享链接、批量重命名和生成分享链接。任务记录只保留在本次服务进程中，下载文件保存到项目的 `downloads/` 目录。
+
+参考界面中的 VIP 容量、广告过滤、自动清理空目录等演示功能没有接入真实账号；界面只显示接口返回的操作结果。`config/cookies.txt`、`config/config.json` 和 `web_browser_data/` 是本地账号数据，已加入 Git 忽略规则。
+
 ## 注意事项
 
 - 首次运行会比较缓慢，请注意底部任务栏，程序会自动打开一个浏览器，让你登录夸克网盘，登录完成后，请不要手动关闭浏览器，回到软件界面按Enter键，浏览器会自动关闭并保存你的登录信息，下次运行就不需要登录了。（如果是Linux环境，请自行在网页获取Cookie后填入config/cookies.txt文件使用）

@@ -16,14 +16,14 @@ from utils import custom_print, generate_random_code, get_datetime, get_timestam
 
 
 class QuarkPanFileManager:
-    def __init__(self, headless: bool = False, slow_mo: int = 0) -> None:
+    def __init__(self, headless: bool = False, slow_mo: int = 0, cookies: str | None = None) -> None:
         self.headless: bool = headless
         self.slow_mo: int = slow_mo
         self.folder_id: Union[str, None] = None
         self.user: Union[str, None] = '用户A'
         self.pdir_id: Union[str, None] = '0'
         self.dir_name: Union[str, None] = '根目录'
-        self.cookies: str = self.get_cookies()
+        self.cookies: str = cookies if cookies is not None else self.get_cookies()
         self.headers: dict[str, str] = {
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko)'
                           ' Chrome/94.0.4606.71 Safari/537.36 Core/1.94.225.400 QQBrowser/12.2.5544.400',
@@ -109,6 +109,7 @@ class QuarkPanFileManager:
                         "fid": file["fid"],
                         "file_name": file["file_name"],
                         "file_type": file["file_type"],
+                        "size": file.get("size", 0),
                         "dir": file["dir"],
                         "pdir_fid": file["pdir_fid"],
                         "include_items": file.get("include_items", ''),
