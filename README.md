@@ -5,6 +5,10 @@
 
 QuarkPanTool 是夸克网盘批量操作工具。本仓库基于 [ihmily/QuarkPanTool](https://github.com/ihmily/QuarkPanTool) 扩展，保留命令行程序，并新增连接本地 Python 服务的 Web 工作台。
 
+## Web 工作台预览
+
+![QuarkPanTool Web 工作台：转存与下载界面](./images/web-workspace.jpg)
+
 ## 功能
 
 - **Web 工作台**：批量解析分享链接并转存，下载自己网盘的分享链接，浏览网盘目录、新建或删除文件夹及文件，批量重命名、创建分享链接，并查看任务记录。
