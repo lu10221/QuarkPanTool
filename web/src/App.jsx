@@ -528,18 +528,24 @@ export default function App() {
   const [customWallpaperLum, setCustomWallpaperLum] = useState(0.25);
   const [customUrlInput, setCustomUrlInput] = useState('');
   const fileInputRef = useRef(null);
+  const storageWarningShown = useRef(false);
 
   // 自动保存用户调节的主题、透明度、毛玻璃和壁纸配置
   useEffect(() => {
     try {
       localStorage.setItem('quark_theme_id', themeId);
       localStorage.setItem('quark_glass_config', JSON.stringify(glassConfig));
-      localStorage.setItem('quark_wallpaper_id', selectedWallpaperId);
       if (customWallpaperUrl && !customWallpaperUrl.startsWith('blob:')) {
         localStorage.setItem('quark_custom_wallpaper_url', customWallpaperUrl);
       }
+      localStorage.setItem('quark_wallpaper_id', selectedWallpaperId);
+      storageWarningShown.current = false;
     } catch {
-      // 忽略存储配额限制
+      if (!storageWarningShown.current) {
+        storageWarningShown.current = true;
+        addLog('外观设置未保存在浏览器，刷新后可能丢失；请使用较小的图片或网络壁纸', 'error');
+        setLogExpanded(true);
+      }
     }
   }, [themeId, glassConfig, selectedWallpaperId, customWallpaperUrl]);
 
@@ -549,8 +555,10 @@ export default function App() {
   const [showFolderModal, setShowFolderModal] = useState(false);
   const [folderPath, setFolderPath] = useState([{ id: '0', name: '全部文件' }]);
   const [folderCandidates, setFolderCandidates] = useState([]);
+  const folderCandidatesRequestId = useRef(0);
   const [session, setSession] = useState({ connected: false });
   const [cookieInput, setCookieInput] = useState('');
+  const [loginStatus, setLoginStatus] = useState({ state: 'idle', error: '' });
   const [taskId, setTaskId] = useState('');
   const [taskKind, setTaskKind] = useState('');
   const seenTaskLogs = useRef(0);
@@ -560,11 +568,16 @@ export default function App() {
   const [transferMode, setTransferMode] = useState('save'); // 'save' | 'download'
   const [queue, setQueue] = useState([]);
   const [isExecuting, setIsExecuting] = useState(false);
+  const executableQueue = queue.filter(item =>
+    !['ok', 'skipped'].includes(item.statuses[transferMode]));
 
   // 网盘文件状态
   const [currentPath, setCurrentPath] = useState(['全部文件']);
   const [pathIds, setPathIds] = useState(['0']);
   const [driveFiles, setDriveFiles] = useState([]);
+  const pathIdsRef = useRef(pathIds);
+  const filesRequestId = useRef(0);
+  pathIdsRef.current = pathIds;
 
   // 批量重命名状态
   const [findPattern, setFindPattern] = useState('【.*?】');
@@ -620,8 +633,16 @@ export default function App() {
         setCustomWallpaperLum(0.25);
       }
     };
+    img.onerror = () => setCustomWallpaperLum(0.25);
     img.src = url;
+    return () => { img.onload = null; img.onerror = null; };
   };
+
+  useEffect(() => {
+    if (selectedWallpaperId === 'custom' && customWallpaperUrl) {
+      return detectImageLuminance(customWallpaperUrl);
+    }
+  }, [selectedWallpaperId, customWallpaperUrl]);
 
   const addLog = (text, type = 'info') => {
     const time = new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -630,31 +651,36 @@ export default function App() {
 
   const reportError = error => addLog(error.message || String(error), 'error');
 
-  const refreshFiles = async (id = pathIds[pathIds.length - 1]) => {
+  const refreshFiles = async (id = pathIdsRef.current[pathIdsRef.current.length - 1]) => {
+    const requestId = ++filesRequestId.current;
     try {
       const { items } = await api(`/api/files?parent=${encodeURIComponent(id)}`);
+      if (requestId !== filesRequestId.current) return;
       setDriveFiles(previous => items.map(item =>
         displayFile(item, previous.find(file => file.id === item.fid)?.checked || false)
       ));
       addLog(`已读取网盘目录：${items.length} 项`, 'info');
-    } catch (error) { reportError(error); }
+    } catch (error) { if (requestId === filesRequestId.current) reportError(error); }
   };
 
   const openFolder = async (id, name, depth) => {
+    const requestId = ++filesRequestId.current;
     try {
       const { items } = await api(`/api/files?parent=${encodeURIComponent(id)}`);
+      if (requestId !== filesRequestId.current) return;
       setPathIds(previous => depth === undefined ? [...previous, id] : previous.slice(0, depth + 1));
       setCurrentPath(previous => depth === undefined ? [...previous, name] : previous.slice(0, depth + 1));
       setDriveFiles(items.map(item => displayFile(item)));
       addLog(`已打开目录：${name}`, 'info');
-    } catch (error) { reportError(error); }
+    } catch (error) { if (requestId === filesRequestId.current) reportError(error); }
   };
 
   const loadFolderCandidates = async (path = folderPath) => {
+    const requestId = ++folderCandidatesRequestId.current;
     try {
       const { items } = await api(`/api/files?parent=${encodeURIComponent(path[path.length - 1].id)}`);
-      setFolderCandidates(items.filter(item => item.dir));
-    } catch (error) { reportError(error); }
+      if (requestId === folderCandidatesRequestId.current) setFolderCandidates(items.filter(item => item.dir));
+    } catch (error) { if (requestId === folderCandidatesRequestId.current) reportError(error); }
   };
 
   useEffect(() => {
@@ -662,6 +688,9 @@ export default function App() {
     (async () => {
       try {
         localToken = (await api('/api/bootstrap')).token;
+        const login = await api('/api/login/status');
+        if (cancelled) return;
+        setLoginStatus(login);
         const account = await api('/api/session');
         if (cancelled) return;
         setSession(account);
@@ -671,6 +700,50 @@ export default function App() {
     })();
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (!['opening', 'waiting', 'saving'].includes(loginStatus.state)) return;
+    let cancelled = false;
+    let timer;
+    const poll = async () => {
+      try {
+        const status = await api('/api/login/status');
+        if (cancelled) return;
+        if (['opening', 'waiting', 'saving'].includes(status.state)) {
+          setLoginStatus(status);
+          timer = window.setTimeout(poll, 800);
+        } else if (status.state === 'done') {
+          const account = await api('/api/session');
+          if (cancelled) return;
+          setSession(account);
+          if (account.connected) {
+            setCurrentPath(['全部文件']);
+            setPathIds(['0']);
+            setTargetFolder('/ 全部文件');
+            setTargetFolderId('0');
+            setCookieInput('');
+            addLog(`浏览器登录成功：${account.nickname}`, 'success');
+            await refreshFiles('0');
+            setLoginStatus(status);
+          } else {
+            const error = account.error || '登录状态验证失败';
+            setLoginStatus({ state: 'error', error });
+            addLog(error, 'error');
+          }
+        } else if (status.state === 'error') {
+          setLoginStatus(status);
+          addLog(`浏览器登录失败：${status.error}`, 'error');
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLoginStatus({ state: 'error', error: error.message || String(error) });
+          reportError(error);
+        }
+      }
+    };
+    timer = window.setTimeout(poll, 800);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [loginStatus.state]);
 
   useEffect(() => {
     if (!showFolderModal) return;
@@ -692,7 +765,7 @@ export default function App() {
         if (taskKind === 'save' || taskKind === 'download') {
           setQueue(previous => previous.map(item => {
             const result = task.results.find(row => row.label === item.url);
-            return result ? { ...item, status: result.status } : item;
+            return result ? { ...item, statuses: { ...item.statuses, [taskKind]: result.status } } : item;
           }));
         }
         if (taskKind === 'share') {
@@ -704,7 +777,14 @@ export default function App() {
         else {
           setIsExecuting(false);
           setTaskId('');
-          addLog(`任务结束：${task.current}/${task.total} 项`, task.state === 'error' ? 'error' : 'success');
+          const success = task.results.filter(result => result.status === 'ok').length;
+          const skipped = task.results.filter(result => result.status === 'skipped').length;
+          const failed = Math.max(
+            task.results.filter(result => result.status === 'error').length + task.total - task.results.length,
+            task.state === 'done' ? 0 : 1
+          );
+          addLog(`任务${task.state === 'partial' ? '部分完成' : task.state === 'error' ? '失败' : '完成'}：成功 ${success}，失败 ${failed}，跳过 ${skipped}`,
+            task.state === 'done' ? 'success' : 'error');
           if (taskKind === 'rename' || taskKind === 'save') void refreshFiles();
         }
       } catch (error) {
@@ -773,9 +853,29 @@ export default function App() {
     } catch (error) { reportError(error); }
   };
 
+  const startBrowserLogin = async () => {
+    setLoginStatus({ state: 'opening', error: '' });
+    try {
+      setLoginStatus(await api('/api/login/start', {}));
+      addLog('正在打开夸克网页登录窗口', 'info');
+    } catch (error) {
+      setLoginStatus({ state: 'error', error: error.message || String(error) });
+      reportError(error);
+    }
+  };
+
+  const finishBrowserLogin = async () => {
+    try {
+      await api('/api/login/finish', {});
+      setLoginStatus({ state: 'saving', error: '' });
+      addLog('正在保存并验证网页登录状态', 'info');
+    } catch (error) { reportError(error); }
+  };
+
   const logout = async () => {
     try {
       await api('/api/session/logout', {});
+      filesRequestId.current += 1;
       setSession({ connected: false });
       setDriveFiles([]);
       addLog('已退出账号', 'info');
@@ -798,7 +898,6 @@ export default function App() {
         const url = canvas.toDataURL('image/jpeg', 0.78);
         setCustomWallpaperUrl(url);
         setSelectedWallpaperId('custom');
-        detectImageLuminance(url);
         addLog(`已加载本地背景图片: ${file.name}`, 'success');
       };
       image.onerror = () => addLog('图片读取失败', 'error');
@@ -813,7 +912,6 @@ export default function App() {
     const url = customUrlInput.trim();
     setCustomWallpaperUrl(url);
     setSelectedWallpaperId('custom');
-    detectImageLuminance(url);
     addLog('已应用自定义网络背景图 URL', 'success');
   };
 
@@ -836,12 +934,16 @@ export default function App() {
       if (seen.has(url.href)) continue;
       seen.add(url.href);
       parsed.push({ id: `${i}-${url.href}`, raw: lines[i], url: url.href,
-        code: url.searchParams.get('pwd') || '免提取码', status: 'pending' });
+        code: url.searchParams.get('pwd') || '免提取码' });
     }
     if (!parsed.length) return addLog('未识别到夸克分享链接', 'error');
     try {
       const { items } = await api('/api/links/parse', { items: parsed.map(item => item.url) });
-      setQueue(items.map((item, index) => ({ ...parsed[index], url: item.url, code: item.code })));
+      setQueue(previous => items.map((item, index) => ({
+        ...parsed[index], url: item.url, code: item.code,
+        statuses: previous.find(row => row.url === item.url)?.statuses ||
+          { save: 'pending', download: 'pending' }
+      })));
       addLog(`后端已验证 ${items.length} 条夸克分享链接`, 'success');
     } catch (error) { reportError(error); }
   };
@@ -856,9 +958,10 @@ export default function App() {
   };
 
   const handleExecuteQueue = () => {
-    if (queue.length === 0 || isExecuting) return;
+    if (executableQueue.length === 0 || isExecuting) return;
+    if (taskId) return addLog('请等待当前任务结束', 'error');
     setIsExecuting(true);
-    void startTask(transferMode, queue.map(item => item.url),
+    void startTask(transferMode, executableQueue.map(item => item.url),
       transferMode === 'save' ? { folderId: targetFolderId } : {});
   };
 
@@ -1412,7 +1515,7 @@ export default function App() {
                   className="text-xs font-bold px-2 py-0.5 rounded-md"
                   style={{ background: currentTheme.accentSoftBg, color: currentTheme.accentText }}
                 >
-                  {queue.length}
+                  {executableQueue.length}
                 </span>
               </div>
               <button
@@ -1452,11 +1555,11 @@ export default function App() {
                                 {item.code}
                               </strong>
                             </span>
-                            {item.status === 'pending' ? (
+                            {item.statuses[transferMode] === 'pending' ? (
                               <span className="text-amber-400/90">● 等待处理</span>
-                            ) : item.status === 'ok' || item.status === 'skipped' ? (
+                            ) : item.statuses[transferMode] === 'ok' || item.statuses[transferMode] === 'skipped' ? (
                               <span className="text-emerald-400 flex items-center gap-1">
-                                <CheckCircle2 className="w-3.5 h-3.5" /> {item.status === 'skipped' ? '已跳过' : '已完成'}
+                                <CheckCircle2 className="w-3.5 h-3.5" /> {item.statuses[transferMode] === 'skipped' ? '已跳过' : '已完成'}
                               </span>
                             ) : (
                               <span className="text-rose-400">执行失败</span>
@@ -1486,14 +1589,14 @@ export default function App() {
               </div>
               <button
                 onClick={handleExecuteQueue}
-                disabled={queue.length === 0 || isExecuting}
+                disabled={executableQueue.length === 0 || isExecuting || Boolean(taskId)}
                 className="btn-theme-primary px-5 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 disabled:opacity-40"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
                 <span>
                   {isExecuting
                     ? '正在处理...'
-                    : `开始${transferMode === 'save' ? '转存' : '下载'} (${queue.length})`}
+                    : `开始${transferMode === 'save' ? '转存' : '下载'} (${executableQueue.length})`}
                 </span>
               </button>
             </div>
@@ -1572,7 +1675,18 @@ export default function App() {
                       {file.type === 'folder' && <Folder className="w-5 h-5 text-amber-400 fill-amber-400/20 shrink-0" />}
                       {file.type === 'video' && <Video className="w-5 h-5 shrink-0" style={{ color: currentTheme.accentText }} />}
                       {file.type === 'text' && <FileText className="w-5 h-5 opacity-60 shrink-0" />}
-                      <span className="font-medium truncate" onDoubleClick={() => file.type === 'folder' && void openFolder(file.id, file.name)}>{file.name}</span>
+                      {file.type === 'folder' ? (
+                        <button
+                          type="button"
+                          onClick={() => void openFolder(file.id, file.name)}
+                          className="font-medium truncate text-left hover:underline"
+                          aria-label={`打开目录 ${file.name}`}
+                        >
+                          {file.name}
+                        </button>
+                      ) : (
+                        <span className="font-medium truncate">{file.name}</span>
+                      )}
                     </td>
                     <td className="py-3.5 px-6 text-xs font-mono" style={{ color: currentTheme.textMuted }}>
                       {file.size}
@@ -1895,14 +2009,14 @@ export default function App() {
           className="glass-main-card rounded-2xl p-6 space-y-6"
           style={{ borderTop: `2px solid ${currentTheme.primary}` }}
         >
-          <div className="flex items-center justify-between border-b border-white/10 pb-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/10 pb-5">
             <div>
               <h3 className="text-sm font-bold">当前夸克账号状态</h3>
               <p className="text-xs mt-1" style={{ color: currentTheme.textMuted }}>
                 {session.connected ? '会话有效，可正常执行网盘操作。' : session.error || '请先配置 Cookie。'}
               </p>
             </div>
-            <div className="flex items-center gap-3 glass-inner-panel px-4 py-2 rounded-xl">
+            <div className="flex items-center gap-3 glass-inner-panel px-4 py-2 rounded-xl self-start sm:self-auto">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
               <span className="text-sm font-semibold">{session.connected ? session.nickname : '未登录'}</span>
               <button onClick={() => void logout()} className="ml-2 text-xs text-rose-400 hover:underline flex items-center gap-1">
@@ -1911,8 +2025,39 @@ export default function App() {
             </div>
           </div>
 
+          <div className="space-y-3 border-b border-white/10 pb-6">
+            <div>
+              <h3 className="text-sm font-bold">浏览器登录</h3>
+              <p className="text-xs mt-1" style={{ color: currentTheme.textMuted }}>
+                {loginStatus.state === 'opening' ? '正在打开 Firefox 登录窗口…' :
+                  loginStatus.state === 'waiting' ? '请在弹出的窗口中登录，完成后点击下方确认。' :
+                  loginStatus.state === 'saving' ? '正在保存 Cookie 并验证账号…' :
+                  loginStatus.state === 'error' ? loginStatus.error :
+                  loginStatus.state === 'done' ? '网页登录完成，账号状态已更新。' :
+                  '在本机打开夸克网盘登录窗口，完成后自动保存 Cookie。'}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={() => void startBrowserLogin()}
+                disabled={['opening', 'waiting', 'saving'].includes(loginStatus.state)}
+                className="btn-theme-primary px-4 py-2 rounded-xl text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                <FolderOpen className="w-4 h-4" /> 打开浏览器登录
+              </button>
+              {loginStatus.state === 'waiting' && (
+                <button
+                  onClick={() => void finishBrowserLogin()}
+                  className="glass-inner-panel px-4 py-2 rounded-xl text-xs font-semibold hover:opacity-90 flex items-center gap-2"
+                >
+                  <Check className="w-4 h-4" /> 我已完成登录
+                </button>
+              )}
+            </div>
+          </div>
+
           <div className="space-y-3">
-            <div className="flex justify-between items-end">
+            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-end gap-1">
               <label className="text-xs font-semibold">更新夸克网盘 Cookie</label>
               <span className="text-[11px] font-mono" style={{ color: currentTheme.accentText }}>
                 需包含 __puus 与 __pus 字段

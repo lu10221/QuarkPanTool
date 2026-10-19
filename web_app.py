@@ -369,13 +369,7 @@ async def download_links(task_id: str, links: list[str]) -> None:
                     target_dir = root.joinpath(*parts)
                     target_dir.mkdir(parents=True, exist_ok=True)
                     target = target_dir / filename
-                    if target.exists():
-                        stem, suffix = target.stem, target.suffix
-                        index = 2
-                        while target.exists():
-                            target = target_dir / f'{stem} ({index}){suffix}'
-                            index += 1
-                    temp = target.with_name(target.name + '.part')
+                    temp = target.with_name(f'{target.name}.{task_id}.part')
                     download_url = data[0]['download_url']
                     if urlparse(download_url).scheme != 'https':
                         raise ApiError('下载地址不是 HTTPS', 502)
@@ -388,7 +382,20 @@ async def download_links(task_id: str, links: list[str]) -> None:
                             with temp.open('wb') as output:
                                 async for chunk in stream.aiter_bytes():
                                     output.write(chunk)
-                        temp.replace(target)
+                        index = 1
+                        while True:
+                            candidate = target if index == 1 else target_dir / f'{target.stem} ({index}){target.suffix}'
+                            try:
+                                candidate.open('xb').close()
+                                break
+                            except FileExistsError:
+                                index += 1
+                        try:
+                            temp.replace(candidate)
+                        except Exception:
+                            candidate.unlink(missing_ok=True)
+                            raise
+                        target = candidate
                     finally:
                         temp.unlink(missing_ok=True)
                     count += 1
@@ -401,14 +408,18 @@ async def download_links(task_id: str, links: list[str]) -> None:
 
 
 def run_task(task_id: str, coroutine) -> None:
+    interrupted = False
     try:
         asyncio.run(coroutine)
-        results = TASKS.get(task_id)['results']
-        TASKS.finish(task_id, 'error' if results and all(
-            result['status'] == 'error' for result in results) else 'done')
     except Exception as exc:
+        interrupted = True
         TASKS.record(task_id, f'任务中断：{exc}')
-        TASKS.finish(task_id, 'error')
+    task = TASKS.get(task_id)
+    results = task['results']
+    failed = interrupted or len(results) < task['total'] or any(
+        result['status'] == 'error' for result in results)
+    completed = any(result['status'] in ('ok', 'skipped') for result in results)
+    TASKS.finish(task_id, 'partial' if failed and completed else 'error' if failed else 'done')
 
 
 class BrowserLogin:

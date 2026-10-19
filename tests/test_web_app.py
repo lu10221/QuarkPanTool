@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from quark_login import QuarkLogin
 from web_app import (ApiError, TaskStore, delete_file, filter_share_items, parse_share_link,
-                     safe_name, save_links, share_files)
+                     download_links, run_task, safe_name, save_links, share_files)
 
 
 class CookieTests(unittest.TestCase):
@@ -71,6 +71,29 @@ class WebAppTests(unittest.TestCase):
         snapshot['results'].clear()
         self.assertEqual(store.get(task_id)['current'], 1)
         self.assertEqual(len(store.get(task_id)['results']), 1)
+
+    def test_task_state_distinguishes_partial_and_total_failure(self):
+        for statuses, expected in (
+            (['ok', 'error'], 'partial'),
+            (['skipped', 'error'], 'partial'),
+            (['error', 'error'], 'error'),
+            (['ok', 'skipped'], 'done'),
+        ):
+            with self.subTest(statuses=statuses):
+                store = TaskStore()
+                task_id = store.create('save', len(statuses))
+                for status in statuses:
+                    store.record(task_id, status, {'label': status, 'status': status})
+                with patch('web_app.TASKS', store):
+                    run_task(task_id, asyncio.sleep(0))
+                self.assertEqual(store.get(task_id)['state'], expected)
+
+        store = TaskStore()
+        task_id = store.create('save', 2)
+        store.record(task_id, 'done', {'label': 'first', 'status': 'ok'})
+        with patch('web_app.TASKS', store):
+            run_task(task_id, asyncio.sleep(0))
+        self.assertEqual(store.get(task_id)['state'], 'partial')
 
     def test_save_task_uses_real_share_metadata(self):
         store = TaskStore()
@@ -161,6 +184,67 @@ class WebAppTests(unittest.TestCase):
             'folder-id', 'Folder', url_type=2, expired_type=1, password='',
         )
         self.assertIn('pwd=1234', store.get(task_id)['results'][0]['url'])
+
+    def test_concurrent_downloads_keep_distinct_complete_files(self):
+        async def download_both(root):
+            arrived = asyncio.Event()
+            streams = 0
+
+            class FakeStream:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_):
+                    pass
+
+                def raise_for_status(self):
+                    pass
+
+                async def aiter_bytes(self):
+                    nonlocal streams
+                    streams += 1
+                    stream_id = streams
+                    if streams == 2:
+                        arrived.set()
+                    await asyncio.wait_for(arrived.wait(), 2)
+                    yield f'content-{stream_id}'.encode()
+
+            class FakeClient:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_):
+                    pass
+
+                async def post(self, *_args, **_kwargs):
+                    response = Mock()
+                    response.json.return_value = {'code': 0, 'data': [{'download_url': 'https://example.test/file'}]}
+                    return response
+
+                def stream(self, *_args, **_kwargs):
+                    return FakeStream()
+
+            fake = Mock(headers={'user-agent': 'test'})
+            fake.get_stoken = AsyncMock(return_value='token')
+            fake.get_detail = AsyncMock(return_value=(1, [
+                {'fid': 'file-id', 'dir': False, 'file_name': 'video.mp4'},
+            ]))
+            store = TaskStore()
+            ids = [store.create('download', 1) for _ in range(2)]
+            with patch('web_app.ROOT', root), patch('web_app.TASKS', store), \
+                    patch('web_app.manager', return_value=fake), \
+                    patch('web_app.httpx.AsyncClient', return_value=FakeClient()):
+                await asyncio.gather(*(download_links(task_id, ['https://pan.quark.cn/s/abc123'])
+                                       for task_id in ids))
+            return [store.get(task_id)['results'][0]['status'] for task_id in ids]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            statuses = asyncio.run(download_both(root))
+            files = sorted((root / 'downloads').iterdir())
+            self.assertEqual(statuses, ['ok', 'ok'])
+            self.assertEqual([file.name for file in files], ['video (2).mp4', 'video.mp4'])
+            self.assertEqual({file.read_bytes() for file in files}, {b'content-1', b'content-2'})
 
 
 if __name__ == '__main__':
